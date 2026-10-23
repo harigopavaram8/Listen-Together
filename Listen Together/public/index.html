@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Listen Together</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --fg:#e8eaf0; --muted:#8b91a1; --accent:#7c5cff; --live:#ff4d5e; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--fg);
+         font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:16px; }
+  .card { width:100%; max-width:460px; background:var(--card); border-radius:16px; padding:26px; }
+  h1 { margin:0 0 4px; font-size:22px; }
+  h2 { margin:0 0 8px; font-size:15px; }
+  p.sub { margin:0 0 16px; color:var(--muted); font-size:14px; }
+  input[type=text] { width:100%; padding:12px; border-radius:10px; border:1px solid #2c3140;
+                     background:#11141a; color:var(--fg); font-size:15px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:12px 16px;
+           font-size:15px; cursor:pointer; }
+  button.ghost { background:#262b38; }
+  button.stop { background:var(--live); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; margin-top:12px; align-items:center; flex-wrap:wrap; }
+  .row > * { flex:1; }
+  section { border-top:1px solid #272b36; margin-top:18px; padding-top:16px; }
+  #player { display:none; }
+  .title { font-size:16px; font-weight:600; margin:0 0 4px; word-break:break-word; }
+  .meta { color:var(--muted); font-size:13px; margin:0 0 12px; }
+  .badge { display:inline-block; background:var(--live); color:#fff; font-size:11px; font-weight:700;
+           border-radius:6px; padding:2px 7px; margin-right:6px; letter-spacing:.5px; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  .times { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-top:4px; }
+  .controls { display:flex; justify-content:center; margin:12px 0; }
+  .controls button { width:64px; height:64px; border-radius:50%; font-size:24px; padding:0; }
+  .share { font-size:13px; color:var(--muted); margin-top:16px; word-break:break-all; }
+  .status { font-size:13px; color:var(--muted); margin-top:8px; min-height:18px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="card">
+
+  <!-- Join -->
+  <div id="join">
+    <h1>🎧 Listen Together</h1>
+    <p class="sub">Enter a room name and share it with friends so they join the same room.</p>
+    <input id="roomInput" type="text" placeholder="e.g. friday-vibes" maxlength="32">
+    <div class="row"><button id="joinBtn">Join room</button></div>
+  </div>
+
+  <!-- Room -->
+  <div id="player">
+    <h1>Room: <span id="roomName"></span></h1>
+    <p class="sub"><span id="listeners">1</span> listening</p>
+
+    <!-- LIVE: stream music from this phone to everyone -->
+    <div id="liveSection">
+      <h2>📱 Play from my phone (live)</h2>
+      <p class="meta" id="liveStatus">Pick songs stored on your phone. Everyone in the room hears them live.</p>
+
+      <div id="listenerBox" class="hidden">
+        <p class="title"><span class="badge">LIVE</span>Streaming from the host</p>
+        <audio id="remoteAudio" controls autoplay playsinline style="width:100%"></audio>
+      </div>
+
+      <div id="hostBox" class="hidden">
+        <p class="title"><span class="badge">LIVE</span><span id="hostTrack">—</span></p>
+        <audio id="hostAudio" playsinline class="hidden"></audio>
+        <div class="row" id="hostControls">
+          <button class="ghost" id="hostToggle">⏸ Pause</button>
+          <button class="ghost" id="hostNext">⏭ Next</button>
+        </div>
+        <div class="row"><button class="stop" id="stopLive">Stop live</button></div>
+      </div>
+
+      <div id="startBox">
+        <input id="hostFiles" type="file" accept="audio/*" multiple hidden>
+        <div class="row">
+          <button id="startLive">Choose songs &amp; go live</button>
+          <button class="ghost hidden" id="shareTab">Share tab / system audio</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- UPLOAD: shared synced track -->
+    <section>
+      <h2>☁️ Or upload one shared track</h2>
+      <p class="title" id="trackName">No track yet</p>
+      <p class="meta" id="trackMeta">Upload a song; everyone plays it in sync.</p>
+
+      <input id="seek" type="range" min="0" max="0" step="0.1" value="0" disabled>
+      <div class="times"><span id="cur">0:00</span><span id="dur">0:00</span></div>
+      <div class="controls"><button id="toggle" disabled>▶</button></div>
+
+      <div class="row">
+        <input id="file" type="file" accept="audio/*" hidden>
+        <button class="ghost" id="uploadBtn">Upload / change track</button>
+      </div>
+    </section>
+
+    <div class="status" id="status"></div>
+    <div class="share">Invite link: <span id="link"></span></div>
+  </div>
+</div>
+
+<audio id="audio" preload="auto"></audio>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const audio = $('audio');
+const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] };
+
+let ws, room, myId = null, rtt = 0, serverState = null, currentUrl = null;
+let isHost = false, liveStream = null, peers = new Map(), listenerPc = null;
+let ctx = null, hostSrc = null, hostDest = null, queue = [], qi = 0, wakeLock = null;
+let sigChain = Promise.resolve();
+
+const fmt = (s) => { s = Math.max(0, s | 0); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+const show = (el, on) => $(el).classList.toggle('hidden', !on);
+
+const params = new URLSearchParams(location.search);
+if (params.get('room')) $('roomInput').value = params.get('room');
+if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && !/Android|iPhone|iPad/i.test(navigator.userAgent)) {
+  show('shareTab', true);
+}
+
+// ---------- Join / connect ----------
+$('joinBtn').onclick = join;
+$('roomInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
+
+function join() {
+  const name = $('roomInput').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 32);
+  if (!name) return;
+  room = name;
+  $('join').style.display = 'none';
+  $('player').style.display = 'block';
+  $('roomName').textContent = room;
+  $('link').textContent = location.origin + '/?room=' + room;
+  audio.play().catch(() => {}); audio.pause(); // user click unlocks audio
+  connect();
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.onopen = () => { ws.send(JSON.stringify({ type: 'join', room })); ping(); };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'hello') myId = m.id;
+    else if (m.type === 'pong') rtt = performance.now() - m.t;
+    else if (m.type === 'state') { applyState(m); handleLive(m); }
+    else if (m.type === 'listener-joined') { if (isHost && liveStream) connectListener(m.id); }
+    else if (m.type === 'signal') { sigChain = sigChain.then(() => doSignal(m.from, m.data)).catch(console.warn); }
+    else if (m.type === 'live-ended') { stopLive(false); $('status').textContent = 'Someone else took over the live stream.'; }
+  };
+  ws.onclose = () => { $('status').textContent = 'Disconnected. Reconnecting…'; closeListener(); setTimeout(connect, 1500); };
+}
+const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+setInterval(() => send({ type: 'ping', t: performance.now() }), 5000);
+function ping() { send({ type: 'ping', t: performance.now() }); }
+setInterval(() => send({ type: 'sync' }), 5000);
+
+// ---------- LIVE MODE ----------
+function tuneOpus(sdp) { // higher-bitrate stereo Opus for music
+  const m = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/);
+  if (!m) return sdp;
+  return sdp.replace(new RegExp(`a=fmtp:${m[1]} `), `a=fmtp:${m[1]} stereo=1;sprop-stereo=1;maxaveragebitrate=192000;`);
+}
+
+async function keepAwake() { try { wakeLock = await navigator.wakeLock.request('screen'); } catch {} }
+
+function handleLive(m) {
+  const otherHostLive = m.live && m.hostId !== myId;
+  show('listenerBox', otherHostLive);
+  show('startBox', !isHost);
+  if (otherHostLive) {
+    audio.pause(); // uploaded-track mode yields to live
+    $('liveStatus').textContent = 'A host is streaming live. Press play below if you hear nothing.';
+  } else if (!m.live) {
+    closeListener();
+    if (!isHost) $('liveStatus').textContent = 'Pick songs stored on your phone. Everyone in the room hears them live.';
+  }
+}
+
+// Host: choose local songs and stream them
+$('startLive').onclick = () => $('hostFiles').click();
+$('hostFiles').onchange = async () => {
+  const files = [...$('hostFiles').files];
+  if (!files.length) return;
+  queue = files; qi = 0;
+
+  if (!ctx) {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    hostSrc = ctx.createMediaElementSource($('hostAudio'));
+    hostDest = ctx.createMediaStreamDestination();
+    hostSrc.connect(hostDest);        // to listeners
+    hostSrc.connect(ctx.destination); // and you hear it too
+  }
+  await ctx.resume();
+  startLive(hostDest.stream);
+  playIndex(0);
+  show('hostControls', true);
+  $('hostFiles').value = '';
+};
+
+$('shareTab').onclick = async () => {
+  try {
+    const cap = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    const track = cap.getAudioTracks()[0];
+    if (!track) { cap.getTracks().forEach(t => t.stop()); $('status').textContent = 'No audio shared. Tick "Share audio" in the picker.'; return; }
+    cap.getVideoTracks().forEach(t => t.stop());
+    startLive(new MediaStream([track]));
+    show('hostControls', false);
+    $('hostTrack').textContent = 'Shared tab / system audio';
+    track.onended = () => stopLive(true);
+  } catch { /* cancelled */ }
+};
+
+function startLive(stream) {
+  isHost = true;
+  liveStream = stream;
+  show('hostBox', true); show('startBox', false); show('listenerBox', false);
+  keepAwake();
+  send({ type: 'go-live' });
+}
+
+function playIndex(i) {
+  qi = i % queue.length;
+  const a = $('hostAudio');
+  if (a.dataset.url) URL.revokeObjectURL(a.dataset.url);
+  const url = URL.createObjectURL(queue[qi]);
+  a.dataset.url = url;
+  a.src = url;
+  a.play().catch(() => {});
+  $('hostTrack').textContent = queue[qi].name;
+  $('hostToggle').textContent = '⏸ Pause';
+}
+$('hostAudio').addEventListener('ended', () => playIndex(qi + 1));
+$('hostNext').onclick = () => playIndex(qi + 1);
+$('hostToggle').onclick = () => {
+  const a = $('hostAudio');
+  if (a.paused) { a.play(); $('hostToggle').textContent = '⏸ Pause'; }
+  else { a.pause(); $('hostToggle').textContent = '▶ Play'; }
+};
+$('stopLive').onclick = () => stopLive(true);
+
+function stopLive(notify) {
+  if (notify) send({ type: 'stop-live' });
+  isHost = false;
+  peers.forEach((pc) => pc.close()); peers.clear();
+  if (liveStream && liveStream !== (hostDest && hostDest.stream)) liveStream.getTracks().forEach(t => t.stop());
+  liveStream = null;
+  $('hostAudio').pause();
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  show('hostBox', false); show('startBox', true);
+  $('liveStatus').textContent = 'Pick songs stored on your phone. Everyone in the room hears them live.';
+}
+
+async function connectListener(id) {
+  const pc = new RTCPeerConnection(ICE);
+  peers.set(id, pc);
+  liveStream.getAudioTracks().forEach((t) => pc.addTrack(t, liveStream));
+  pc.onicecandidate = (e) => e.candidate && send({ type: 'signal', to: id, data: { candidate: e.candidate } });
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) { pc.close(); peers.delete(id); }
+  };
+  const offer = await pc.createOffer();
+  offer.sdp = tuneOpus(offer.sdp);
+  await pc.setLocalDescription(offer);
+  send({ type: 'signal', to: id, data: { sdp: pc.localDescription } });
+}
+
+async function doSignal(from, data) {
+  if (isHost) {
+    const pc = peers.get(from);
+    if (!pc) return;
+    if (data.sdp) await pc.setRemoteDescription(data.sdp);
+    else if (data.candidate) await pc.addIceCandidate(data.candidate);
+    return;
+  }
+  // Listener side
+  if (data.sdp) {
+    closeListener();
+    listenerPc = new RTCPeerConnection(ICE);
+    listenerPc.onicecandidate = (e) => e.candidate && send({ type: 'signal', to: from, data: { candidate: e.candidate } });
+    listenerPc.ontrack = (e) => {
+      const r = $('remoteAudio');
+      r.srcObject = e.streams[0];
+      r.play().catch(() => { $('status').textContent = 'Tap play on the live player to hear audio.'; });
+    };
+    await listenerPc.setRemoteDescription(data.sdp);
+    const answer = await listenerPc.createAnswer();
+    answer.sdp = tuneOpus(answer.sdp);
+    await listenerPc.setLocalDescription(answer);
+    send({ type: 'signal', to: from, data: { sdp: listenerPc.localDescription } });
+  } else if (data.candidate && listenerPc) {
+    await listenerPc.addIceCandidate(data.candidate);
+  }
+}
+
+function closeListener() {
+  if (listenerPc) { listenerPc.close(); listenerPc = null; }
+  $('remoteAudio').srcObject = null;
+}
+
+// ---------- UPLOADED-TRACK MODE (synced shared file) ----------
+function applyState(s) {
+  serverState = s;
+  $('listeners').textContent = s.listeners;
+  if (!s.track) { $('trackName').textContent = 'No track yet'; return; }
+
+  $('trackName').textContent = s.track.name;
+  $('trackMeta').textContent = 'Everyone hears this in sync';
+
+  if (currentUrl !== s.track.url) {
+    currentUrl = s.track.url;
+    audio.src = s.track.url;
+    audio.load();
+    $('seek').disabled = false;
+    $('toggle').disabled = false;
+    audio.onloadedmetadata = () => { $('seek').max = audio.duration; $('dur').textContent = fmt(audio.duration); align(); };
+    return;
+  }
+  align();
+}
+
+function align() {
+  const s = serverState;
+  if (!s || audio.readyState < 1) return;
+  if (s.live) { audio.pause(); return; }
+  const target = s.position + (s.playing ? rtt / 2000 : 0);
+  if (Math.abs(audio.currentTime - target) > 0.35) audio.currentTime = target;
+  if (s.playing && audio.paused) audio.play().catch(() => { $('status').textContent = 'Tap play to start audio'; });
+  if (!s.playing && !audio.paused) audio.pause();
+  $('toggle').textContent = s.playing ? '⏸' : '▶';
+}
+
+$('toggle').onclick = () => {
+  const playing = serverState && serverState.playing;
+  send({ type: playing ? 'pause' : 'play', position: audio.currentTime });
+};
+$('seek').addEventListener('change', (e) => send({ type: 'seek', position: Number(e.target.value) }));
+audio.addEventListener('timeupdate', () => {
+  if (!document.activeElement || document.activeElement.id !== 'seek') $('seek').value = audio.currentTime;
+  $('cur').textContent = fmt(audio.currentTime);
+});
+audio.addEventListener('ended', () => send({ type: 'pause', position: 0 }));
+
+$('uploadBtn').onclick = () => $('file').click();
+$('file').onchange = async () => {
+  const f = $('file').files[0];
+  if (!f) return;
+  $('status').textContent = 'Uploading…';
+  try {
+    const r = await fetch(`/upload/${room}?name=${encodeURIComponent(f.name)}`, { method: 'POST', body: f });
+    const j = await r.json();
+    $('status').textContent = r.ok ? 'Track ready. Press play!' : (j.error || 'Upload failed');
+  } catch { $('status').textContent = 'Upload failed'; }
+  $('file').value = '';
+};
+</script>
+</body>
+</html>

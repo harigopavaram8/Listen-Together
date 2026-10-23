@@ -1,0 +1,15 @@
+{
+  "name": "listen-together",
+  "version": "1.1.0",
+  "description": "Listen to music together in sync over the internet",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
